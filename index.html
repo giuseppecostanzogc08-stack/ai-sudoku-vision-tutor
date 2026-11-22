@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Sudoku Vision &amp; Tutor</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app-container">
+    <header>
+      <h1>AI Sudoku Vision &amp; Tutor</h1>
+      <p>Carica o scatta una foto del Sudoku, verifica la griglia 9x9, chiedi un aiuto progressivo o risolvilo.</p>
+    </header>
+
+    <section class="card">
+      <!-- Avatar Interattivo SVG -->
+      <div class="avatar-bar">
+        <svg id="avatarSvg" class="avatar-svg mood-ready" viewBox="0 0 80 80" aria-hidden="true">
+          <circle cx="40" cy="40" r="35" fill="#dbeafe" stroke="#2563eb" stroke-width="3" />
+          <g id="avatarEyes">
+            <circle cx="29" cy="34" r="4" fill="#0f172a" />
+            <circle cx="51" cy="34" r="4" fill="#0f172a" />
+          </g>
+          <path id="avatarBrows" d="M 23 26 Q 29 23 35 26 M 45 26 Q 51 23 57 26" stroke="#1e40af" stroke-width="2.5" fill="none" stroke-linecap="round" />
+          <path id="avatarMouth" d="M 28 50 Q 40 58 52 50" stroke="#0f172a" stroke-width="3" fill="none" stroke-linecap="round" />
+        </svg>
+        <div>
+          <div id="avatarTitle" class="avatar-title">SudoBot — Pronto ad aiutarti</div>
+          <div id="avatarSub" class="avatar-sub">Carica uno schema o chiedi un suggerimento a 3 livelli.</div>
+        </div>
+      </div>
+
+      <h2>1. Acquisizione Immagine &amp; AR Lite</h2>
+      <div class="controls">
+        <label class="btn-label" for="imageInput">Carica / Scatta Foto</label>
+        <input id="imageInput" type="file" accept="image/*" capture="environment" hidden />
+        <button id="btnOcr" type="button" class="secondary">Estrai Griglia (OCR)</button>
+        <button id="btnArOverlay" type="button" class="secondary">Aggiorna Overlay AR</button>
+        <button id="btnSample" type="button" class="secondary">Carica Schema Esempio</button>
+        <button id="btnClear" type="button" class="secondary">Svuota Griglia</button>
+      </div>
+
+      <div id="previewContainer" style="margin-top: 14px; text-align: center; display: none;">
+        <div class="ar-stage">
+          <img id="previewImage" alt="Anteprima Sudoku" />
+          <canvas id="arCanvas"></canvas>
+        </div>
+        <div style="font-size: 0.85rem; color: #475569; margin-top: 6px;">
+          Layer AR Lite: clicca su "Aggiorna Overlay AR" per proiettare sulla foto i numeri mancanti della griglia attuale.
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>2. Griglia 9x9 Interattiva</h2>
+      <p style="margin-top: 0; color: #5c687a; font-size: 0.95rem;">
+        Clicca su una cella per inserire o correggere un numero (1-9) oppure cancella per lasciarla vuota.
+      </p>
+
+      <div id="sudokuGrid" class="sudoku-grid" aria-label="Griglia Sudoku 9 per 9"></div>
+
+      <!-- Hint Progressivi (3 livelli) + Solutore Ibrido + Tutor Vocale -->
+      <div class="controls">
+        <button id="btnHintLv1" type="button" class="secondary">Hint Liv. 1: Blocco</button>
+        <button id="btnHintLv2" type="button" class="secondary">Hint Liv. 2: Cella</button>
+        <button id="btnHintLv3" type="button">Hint Liv. 3: Rivela e Spiega</button>
+        <button id="btnSolve" type="button">Risolvi Sudoku (Ibrido)</button>
+        <button id="btnSpeak" type="button" class="secondary">Leggi / Stop Voce</button>
+      </div>
+
+      <div id="explanationBox" class="explanation-box">
+        Pronto. Carica un'immagine o usa uno schema di esempio per iniziare.
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const API_BASE = "http://localhost:3005";
+
+    const SAMPLE_GRID = [
+      [5, 3, 0, 0, 7, 0, 0, 0, 0],
+      [6, 0, 0, 1, 9, 5, 0, 0, 0],
+      [0, 9, 8, 0, 0, 0, 0, 6, 0],
+      [8, 0, 0, 0, 6, 0, 0, 0, 3],
+      [4, 0, 0, 8, 0, 3, 0, 0, 1],
+      [7, 0, 0, 0, 2, 0, 0, 0, 6],
+      [0, 6, 0, 0, 0, 0, 2, 8, 0],
+      [0, 0, 0, 4, 1, 9, 0, 0, 5],
+      [0, 0, 0, 0, 8, 0, 0, 7, 9]
+    ];
+
+    const gridEl = document.getElementById("sudokuGrid");
+    const explanationEl = document.getElementById("explanationBox");
+    const imageInput = document.getElementById("imageInput");
+    const previewContainer = document.getElementById("previewContainer");
+    const previewImage = document.getElementById("previewImage");
+    const arCanvas = document.getElementById("arCanvas");
+    const btnSpeak = document.getElementById("btnSpeak");
+
+    const avatarSvg = document.getElementById("avatarSvg");
+    const avatarEyes = document.getElementById("avatarEyes");
+    const avatarBrows = document.getElementById("avatarBrows");
+    const avatarMouth = document.getElementById("avatarMouth");
+    const avatarTitle = document.getElementById("avatarTitle");
+    const avatarSub = document.getElementById("avatarSub");
+
+    let selectedImageBase64 = null;
+    let initialLockedCells = Array.from({ length: 9 }, () => Array(9).fill(false));
+    let activeHintTarget = null;
+    let arOverlayEnabled = false;
+
+    // --- 1. Avatar Interattivo ---
+    function setAvatarMood(mood, title, sub) {
+      avatarSvg.classList.remove("mood-ready", "mood-thinking", "mood-happy");
+      if (mood === "thinking") {
+        avatarSvg.classList.add("mood-thinking");
+        avatarEyes.innerHTML = `<circle cx="29" cy="34" r="3.5" fill="#0f172a" /><circle cx="51" cy="32" r="4.5" fill="#0f172a" />`;
+        avatarBrows.setAttribute("d", "M 23 25 L 35 28 M 45 27 L 57 23");
+        avatarMouth.setAttribute("d", "M 32 52 Q 40 48 48 52");
+      } else if (mood === "happy") {
+        avatarSvg.classList.add("mood-happy");
+        avatarEyes.innerHTML = `<path d="M 25 34 Q 29 29 33 34" stroke="#0f172a" stroke-width="3" fill="none" stroke-linecap="round" /><path d="M 47 34 Q 51 29 55 34" stroke="#0f172a" stroke-width="3" fill="none" stroke-linecap="round" />`;
+        avatarBrows.setAttribute("d", "M 23 24 Q 29 20 35 24 M 45 24 Q 51 20 57 24");
+        avatarMouth.setAttribute("d", "M 27 48 Q 40 60 53 48");
+      } else {
+        avatarSvg.classList.add("mood-ready");
+        avatarEyes.innerHTML = `<circle cx="29" cy="34" r="4" fill="#0f172a" /><circle cx="51" cy="34" r="4" fill="#0f172a" />`;
+        avatarBrows.setAttribute("d", "M 23 26 Q 29 23 35 26 M 45 26 Q 51 23 57 26");
+        avatarMouth.setAttribute("d", "M 28 50 Q 40 58 52 50");
+      }
+      if (title) avatarTitle.textContent = title;
+      if (sub) avatarSub.textContent = sub;
+    }
+
+    // --- 2. Tutor Vocale (Web Speech API) ---
+    function leggiSpiegazione(testo) {
+      if (!("speechSynthesis" in window) || !testo) return;
+      window.speechSynthesis.cancel();
+
+      const utterance = new SpeechSynthesisUtterance(testo);
+      utterance.lang = "it-IT";
+      utterance.rate = 1;
+
+      if (btnSpeak) {
+        btnSpeak.textContent = "Stop Voce";
+        utterance.onend = () => { btnSpeak.textContent = "Leggi / Stop Voce"; };
+        utterance.onerror = () => { btnSpeak.textContent = "Leggi / Stop Voce"; };
+      }
+      window.speechSynthesis.speak(utterance);
+    }
+
+    function fermaLettura() {
+      if ("speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+      }
+      if (btnSpeak) btnSpeak.textContent = "Leggi / Stop Voce";
+    }
+
+    btnSpeak.addEventListener("click", () => {
+      if ("speechSynthesis" in window && window.speechSynthesis.speaking) {
+        fermaLettura();
+      } else {
+        leggiSpiegazione(explanationEl.textContent.trim());
+      }
+    });
+
+    function setMessage(text, parla = false) {
+      explanationEl.textContent = text;
+      if (parla) leggiSpiegazione(text);
+    }
+
+    function clearHighlights() {
+      gridEl.querySelectorAll(".sudoku-cell").forEach((inp) => {
+        inp.classList.remove("hint-cell", "block-cell");
+      });
+    }
+
+    // --- Griglia 9x9 ---
+    function createGrid() {
+      gridEl.innerHTML = "";
+      for (let r = 0; r < 9; r++) {
+        for (let c = 0; c < 9; c++) {
+          const input = document.createElement("input");
+          input.type = "text";
+          input.inputMode = "numeric";
+          input.maxLength = 1;
+          input.className = "sudoku-cell";
+          input.dataset.row = String(r);
+          input.dataset.col = String(c);
+
+          if (c === 2 || c === 5) input.classList.add("border-right-thick");
+          if (r === 2 || r === 5) input.classList.add("border-bottom-thick");
+
+          input.addEventListener("input", () => {
+            const clean = input.value.replace(/[^1-9]/g, "");
+            input.value = clean;
+            input.classList.remove("ai-solved", "hint-cell", "block-cell");
+            initialLockedCells[r][c] = clean !== "";
+            activeHintTarget = null;
+            if (arOverlayEnabled) renderArOverlay();
+          });
+
+          gridEl.appendChild(input);
+        }
+      }
+    }
+
+    function getGridMatrix() {
+      const matrix = Array.from({ length: 9 }, () => Array(9).fill(0));
+      gridEl.querySelectorAll(".sudoku-cell").forEach((input) => {
+        const r = Number(input.dataset.row);
+        const c = Number(input.dataset.col);
+        const val = parseInt(input.value, 10);
+        matrix[r][c] = Number.isInteger(val) && val >= 1 && val <= 9 ? val : 0;
+      });
+      return matrix;
+    }
+
+    function renderGridMatrix(matrix, markAiCells = false) {
+      gridEl.querySelectorAll(".sudoku-cell").forEach((input) => {
+        const r = Number(input.dataset.row);
+        const c = Number(input.dataset.col);
+        const val = matrix[r][c];
+        const prevVal = parseInt(input.value, 10) || 0;
+
+        input.value = val >= 1 && val <= 9 ? String(val) : "";
+        input.classList.remove("hint-cell", "block-cell");
+
+        if (markAiCells && val !== 0 && !initialLockedCells[r][c] && prevVal === 0) {
+          input.classList.add("ai-solved");
+        } else if (!markAiCells) {
+          input.classList.remove("ai-solved");
+        }
+      });
+      if (arOverlayEnabled) renderArOverlay();
+    }
+
+    function setInitialGrid(matrix) {
+      initialLockedCells = matrix.map((row) => row.map((v) => v >= 1 && v <= 9));
+      activeHintTarget = null;
+      renderGridMatrix(matrix, false);
+    }
+
+    // --- 3. Solutore Locale Backtracking + Supporto Ibrido ---
+    function isValidMove(grid, row, col, num) {
+      for (let i = 0; i < 9; i++) {
+        if (grid[row][i] === num || grid[i][col] === num) return false;
+      }
+      const startRow = Math.floor(row / 3) * 3;
+      const startCol = Math.floor(col / 3) * 3;
+      for (let r = startRow; r < startRow + 3; r++) {
+        for (let c = startCol; c < startCol + 3; c++) {
+          if (grid[r][c] === num) return false;
+        }
+      }
+      return true;
+    }
+
+    function solveLocal(inputGrid) {
+      const grid = inputGrid.map((row) => row.slice());
+      function findEmpty() {
+        for (let r = 0; r < 9; r++) {
+          for (let c = 0; c < 9; c++) {
+            if (grid[r][c] === 0) return { r, c };
+          }
+        }
+        return null;
+      }
+      function backtrack() {
+        const empty = findEmpty();
+        if (!empty) return true;
+        for (let num = 1; num <= 9; num++) {
+          if (isValidMove(grid, empty.r, empty.c, num)) {
+            grid[empty.r][empty.c] = num;
+            if (backtrack()) return true;
+            grid[empty.r][empty.c] = 0;
+          }
+        }
+        return false;
+      }
+      return backtrack() ? grid : null;
+    }
+
+    function findEasyMoveLocal(grid) {
+      for (let r = 0; r < 9; r++) {
+        for (let c = 0; c < 9; c++) {
+          if (grid[r][c] === 0) {
+            const candidates = [];
+            for (let num = 1; num <= 9; num++) {
+              if (isValidMove(grid, r, c, num)) candidates.push(num);
+            }
+            if (candidates.length === 1) {
+              const val = candidates[0];
+              return {
+                row: r,
+                col: c,
+                valore: val,
+                spiegazione: `Nella cella (riga ${r + 1}, colonna ${c + 1}) l'unico numero valido tra 1 e 9 è ${val}, considerando riga, colonna e riquadro 3x3.`
+              };
+            }
+          }
+        }
+      }
+
+      const solved = solveLocal(grid);
+      if (!solved) return null;
+      for (let r = 0; r < 9; r++) {
+        for (let c = 0; c < 9; c++) {
+          if (grid[r][c] === 0) {
+            return {
+              row: r,
+              col: c,
+              valore: solved[r][c],
+              spiegazione: `In base alla configurazione attuale, nella cella (riga ${r + 1}, colonna ${c + 1}) va inserito il numero ${solved[r][c]}.`
+            };
+          }
+        }
+      }
+      return null;
+    }
+
+    async function computeNextMoveHybrid(grid) {
+      try {
+        const res = await fetch(`${API_BASE}/api/hint`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ grid })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (typeof data.row === "number" && typeof data.col === "number" && data.valore) {
+            return {
+              row: data.row,
+              col: data.col,
+              valore: data.valore,
+              spiegazione: data.spiegazione || `Inserisci ${data.valore} in riga ${data.row + 1}, colonna ${data.col + 1}.`,
+              source: "Gemini + Ibrido"
+            };
+          }
+        }
+      } catch (_) {}
+
+      const localMove = findEasyMoveLocal(grid);
+      return localMove ? { ...localMove, source: "Solutore Ibrido Locale" } : null;
+    }
+
+    function highlightBlock(row, col) {
+      const startR = Math.floor(row / 3) * 3;
+      const startC = Math.floor(col / 3) * 3;
+      for (let r = startR; r < startR + 3; r++) {
+        for (let c = startC; c < startC + 3; c++) {
+          const cell = gridEl.querySelector(`.sudoku-cell[data-row="${r}"][data-col="${c}"]`);
+          if (cell) cell.classList.add("block-cell");
+        }
+      }
+    }
+
+    // --- 4. AR Lite Overlay Fotografico (HTML5 Canvas) ---
+    function clearArOverlay() {
+      const ctx = arCanvas.getContext("2d");
+      ctx.clearRect(0, 0, arCanvas.width, arCanvas.height);
+    }
+
+    function renderArOverlay() {
+      if (!arOverlayEnabled || !selectedImageBase64 || previewContainer.style.display === "none") return;
+      const w = previewImage.clientWidth;
+      const h = previewImage.clientHeight;
+      if (!w || !h) return;
+
+      arCanvas.width = w;
+      arCanvas.height = h;
+      const ctx = arCanvas.getContext("2d");
+      ctx.clearRect(0, 0, w, h);
+
+      const currentGrid = getGridMatrix();
+      const solvedGrid = solveLocal(currentGrid);
+      if (!solvedGrid) {
+        setMessage("Impossibile calcolare l'overlay AR: controlla che la griglia attuale non abbia conflitti.");
+        return;
+      }
+
+      const cellW = w / 9;
+      const cellH = h / 9;
+      ctx.font = `bold ${Math.max(12, Math.floor(Math.min(cellW, cellH) * 0.58))}px sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+
+      for (let r = 0; r < 9; r++) {
+        for (let c = 0; c < 9; c++) {
+          if (!initialLockedCells[r][c]) {
+            const valToDraw = currentGrid[r][c] !== 0 ? currentGrid[r][c] : solvedGrid[r][c];
+            if (valToDraw) {
+              const cx = c * cellW + cellW / 2;
+              const cy = r * cellH + cellH / 2;
+              ctx.fillStyle = "rgba(15, 23, 42, 0.72)";
+              ctx.beginPath();
+              ctx.arc(cx, cy, Math.min(cellW, cellH) * 0.34, 0, Math.PI * 2);
+              ctx.fill();
+
+              ctx.fillStyle = "#4ade80";
+              ctx.fillText(String(valToDraw), cx, cy + 1);
+            }
+          }
+        }
+      }
+    }
+
+    // --- Eventi UI ---
+    imageInput.addEventListener("change", (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        selectedImageBase64 = reader.result;
+        arOverlayEnabled = false;
+        previewImage.onload = () => clearArOverlay();
+        previewImage.src = selectedImageBase64;
+        previewContainer.style.display = "block";
+        clearArOverlay();
+        setAvatarMood("happy", "SudoBot — Foto caricata!", "Clicca su 'Estrai Griglia (OCR)' o 'Aggiorna Overlay AR'.");
+        setMessage("Immagine caricata. L'overlay AR non è attivo finché non clicchi su 'Aggiorna Overlay AR'.");
+      };
+      reader.readAsDataURL(file);
+    });
+
+    document.getElementById("btnArOverlay").addEventListener("click", () => {
+      if (!selectedImageBase64) {
+        setMessage("Carica prima una foto per attivare l'Overlay AR.");
+        return;
+      }
+      arOverlayEnabled = true;
+      previewContainer.style.display = "block";
+      renderArOverlay();
+      setAvatarMood("happy", "SudoBot — AR Lite attivo!", "Numeri della griglia attuale proiettati sulla foto.");
+      setMessage("Overlay AR aggiornato sopra la foto in base alla griglia attualmente caricata.");
+    });
+
+    document.getElementById("btnSample").addEventListener("click", () => {
+      fermaLettura();
+      setInitialGrid(SAMPLE_GRID);
+      setAvatarMood("ready", "SudoBot — Schema pronto", "Prova i 3 livelli di Hint oppure risolvi la griglia.");
+      setMessage("Schema di esempio caricato. Puoi modificarlo o chiedere un suggerimento.");
+    });
+
+    document.getElementById("btnClear").addEventListener("click", () => {
+      fermaLettura();
+      arOverlayEnabled = false;
+      clearArOverlay();
+      setInitialGrid(Array.from({ length: 9 }, () => Array(9).fill(0)));
+      setAvatarMood("ready", "SudoBot — Griglia vuota", "Inserisci i numeri o carica un'immagine.");
+      setMessage("Griglia svuotata.");
+    });
+
+    document.getElementById("btnOcr").addEventListener("click", async () => {
+      if (!selectedImageBase64) {
+        setMessage("Seleziona o scatta prima una foto del Sudoku.");
+        return;
+      }
+      setAvatarMood("thinking", "SudoBot — Sto leggendo la foto...", "Analisi OCR della matrice 9x9 in corso.");
+      setMessage("Invio immagine al backend per l'OCR...");
+      try {
+        const res = await fetch(`${API_BASE}/api/ocr`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ image: selectedImageBase64 })
+        });
+        const data = await res.json();
+        if (!res.ok || !data.grid) {
+          throw new Error(data.error || "Endpoint /api/ocr non disponibile o errore OCR");
+        }
+        setInitialGrid(data.grid);
+        setAvatarMood("happy", "SudoBot — Griglia estratta!", "Controlla i numeri prima di proseguire.");
+        setMessage("Griglia estratta! Controlla i numeri prima di proseguire.");
+      } catch (err) {
+        const isQuota = String(err.message || "").includes("429") || String(err.message || "").includes("quota");
+        setAvatarMood("ready", "SudoBot — Correzione manuale", "Puoi inserire o correggere i numeri direttamente sulla griglia.");
+        setMessage(
+          isQuota
+            ? "Limite giornaliero gratuito Gemini (429) raggiunto per l'OCR. Puoi inserire i numeri manualmente o usare lo schema di esempio."
+            : `OCR non disponibile ora (${err.message}). Puoi inserire i numeri manualmente.`
+        );
+      }
+    });
+
+    document.getElementById("btnHintLv1").addEventListener("click", async () => {
+      clearHighlights();
+      setAvatarMood("thinking", "SudoBot — Cerco il riquadro...", "Livello 1: individuo il blocco 3x3.");
+      const grid = getGridMatrix();
+      const move = await computeNextMoveHybrid(grid);
+      if (!move) {
+        setMessage("Nessuna mossa trovata: controlla che non ci siano conflitti nella griglia.");
+        return;
+      }
+      activeHintTarget = move;
+      highlightBlock(move.row, move.col);
+      const blockNum = Math.floor(move.row / 3) * 3 + Math.floor(move.col / 3) + 1;
+      setAvatarMood("ready", "SudoBot — Livello 1 (Blocco)", `Osserva il riquadro 3x3 numero ${blockNum}.`);
+      setMessage(`Hint Livello 1: osserva il riquadro 3x3 numero ${blockNum} (evidenziato in azzurro).`);
+    });
+
+    document.getElementById("btnHintLv2").addEventListener("click", async () => {
+      clearHighlights();
+      setAvatarMood("thinking", "SudoBot — Individuo la cella...", "Livello 2: cerco la cella esatta.");
+      const grid = getGridMatrix();
+      const move = activeHintTarget || await computeNextMoveHybrid(grid);
+      if (!move) {
+        setMessage("Nessuna mossa trovata: controlla che non ci siano conflitti nella griglia.");
+        return;
+      }
+      activeHintTarget = move;
+      highlightBlock(move.row, move.col);
+      const cell = gridEl.querySelector(`.sudoku-cell[data-row="${move.row}"][data-col="${move.col}"]`);
+      if (cell) {
+        cell.classList.add("hint-cell");
+        cell.focus();
+      }
+      setAvatarMood("ready", "SudoBot — Livello 2 (Cella)", `Guarda riga ${move.row + 1}, colonna ${move.col + 1}.`);
+      setMessage(`Hint Livello 2: la cella da osservare è in riga ${move.row + 1}, colonna ${move.col + 1}.`);
+    });
+
+    document.getElementById("btnHintLv3").addEventListener("click", async () => {
+      clearHighlights();
+      setAvatarMood("thinking", "SudoBot — Preparo la spiegazione...", "Livello 3: calcolo valore e motivazione.");
+      const grid = getGridMatrix();
+      const move = activeHintTarget || await computeNextMoveHybrid(grid);
+      if (!move) {
+        setMessage("Nessuna mossa trovata: controlla che non ci siano conflitti nella griglia.");
+        return;
+      }
+      const cell = gridEl.querySelector(`.sudoku-cell[data-row="${move.row}"][data-col="${move.col}"]`);
+      if (cell) {
+        cell.value = String(move.valore);
+        cell.classList.add("hint-cell");
+        cell.focus();
+      }
+      activeHintTarget = null;
+      if (arOverlayEnabled) renderArOverlay();
+      setAvatarMood("happy", "SudoBot — Mossa rivelata!", `Inserito ${move.valore} in (${move.row + 1}, ${move.col + 1}).`);
+      setMessage(`Hint Livello 3 (${move.source}): ${move.spiegazione}`, true);
+    });
+
+    document.getElementById("btnSolve").addEventListener("click", async () => {
+      clearHighlights();
+      setAvatarMood("thinking", "SudoBot — Sto risolvendo...", "Solutore ibrido con backtracking in corso.");
+      const currentGrid = getGridMatrix();
+      const solvedLocal = solveLocal(currentGrid);
+
+      if (!solvedLocal) {
+        setAvatarMood("ready", "SudoBot — Controlla la griglia", "Ci sono numeri duplicati o la griglia non ha soluzione.");
+        setMessage("Impossibile risolvere questa griglia: verifica che non ci siano conflitti tra i numeri inseriti.");
+        return;
+      }
+
+      try {
+        const res = await fetch(`${API_BASE}/api/solve`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ grid: currentGrid })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data && data.grid) {
+            renderGridMatrix(data.grid, true);
+            setAvatarMood("happy", "SudoBot — Sudoku completato!", "Ottimo lavoro! Griglia risolta.");
+            setMessage("Sudoku risolto! Le celle in verde sono state inserite.");
+            return;
+          }
+        }
+      } catch (_) {}
+
+      renderGridMatrix(solvedLocal, true);
+      setAvatarMood("happy", "SudoBot — Sudoku completato!", "Risoluzione esatta tramite backtracking locale.");
+      setMessage("[Solutore Ibrido: Backtracking 100% locale] Sudoku completato! Le celle in verde indicano i numeri aggiunti.");
+    });
+
+    createGrid();
+    setInitialGrid(SAMPLE_GRID);
+  </script>
+</body>
+</html>
